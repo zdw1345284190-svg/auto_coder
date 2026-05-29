@@ -1,7 +1,5 @@
 """
-开发代理
-增强版：支持测试失败自动迭代修复 + 接收测试报告针对性改代码
-流式输出+实时Token+全量日志 完全保留
+开发代理（修复版：强制绑定项目工作目录）
 """
 import os
 import threading
@@ -14,26 +12,22 @@ from .logger import get_task_logger
 class DeveloperAgent:
     def __init__(self, project_path: str):
         self.project_path = Path(project_path)
+        # 确保项目目录存在
+        self.project_path.mkdir(parents=True, exist_ok=True)
+        
+        # 关键修复：初始化时就绑定项目工作目录
         self.llm = ChatClaudeCode(
             cli_path=Config.CLAUDE_CODE_CLI_PATH,
             temperature=Config.DEVELOPER_TEMPERATURE,
             timeout=Config.TASK_TIMEOUT,
-            work_dir=str(self.project_path)
+            work_dir=str(self.project_path)  # 强制绑定项目目录
         )
 
     @staticmethod
     def count_tokens(text: str) -> int:
-        """全局统一Token计算规则"""
         return len(text) // 4
 
     def develop(self, task: dict, context: dict, test_report: str = "", is_fix: bool = False) -> dict:
-        """
-        执行开发任务
-        :param task: 任务信息
-        :param context: 项目全局上下文
-        :param test_report: 上一轮测试报告（失败原因）
-        :param is_fix: 是否为【修复模式】
-        """
         logger = get_task_logger(task["id"])
         task_name = task['name']
         task_id = task['id']
@@ -45,11 +39,11 @@ class DeveloperAgent:
             logger.info(f"🚀 启动【全新开发任务】")
         logger.info(f"任务ID：{task_id}")
         logger.info(f"任务名称：{task_name}")
+        logger.info(f"项目工作目录：{self.project_path}")
         logger.info("=" * 80)
 
-        # ========== 区分提示词：正常开发 / 修复开发 ==========
+        # 关键修复：在提示词中再次强调工作目录，避免模型执行全局命令
         if not is_fix:
-            # 首次开发提示词
             prompt = f"""
 # 全新开发任务执行
 ## 任务基本信息
@@ -62,14 +56,18 @@ class DeveloperAgent:
 技术栈：{context.get('tech_stack', '无')}
 项目架构：{context.get('architecture', '无')}
 
+## 【强制要求】工作目录与依赖管理
+1. **当前工作目录固定为：{self.project_path}**
+2. 所有文件操作、命令执行必须在此目录下进行
+3. 安装依赖时，必须使用 `npm install` / `pip install` 且不指定全局参数，依赖会自动安装到当前目录
+4. 生成的所有文件必须保存在当前目录下，不要使用绝对路径
+
 ## 开发要求
-1. 工作目录：{self.project_path}
-2. 编写可运行、规范、带注释的代码
-3. 自动创建/修改项目文件
-4. 完成后输出开发总结报告
+1. 编写可运行、规范、带注释的代码
+2. 自动创建/修改项目文件
+3. 完成后输出开发总结报告
             """
         else:
-            # 修复模式提示词（核心：基于测试报告改BUG）
             prompt = f"""
 # 代码修复迭代任务
 ## 任务信息
@@ -81,11 +79,17 @@ class DeveloperAgent:
 项目概述：{context.get('project_overview', '无')}
 技术栈：{context.get('tech_stack', '无')}
 
+## 【强制要求】工作目录与依赖管理
+1. **当前工作目录固定为：{self.project_path}**
+2. 所有文件操作、命令执行必须在此目录下进行
+3. 安装依赖时，必须使用 `npm install` / `pip install` 且不指定全局参数，依赖会自动安装到当前目录
+4. 修改文件时，只修改当前目录下的文件，不要修改外部文件
+
 ## 【重要】上一轮测试失败报告（必须根据此内容修复）
 {test_report}
 
 ## 修复要求
-1. 工作目录：{self.project_path}，**基于现有代码修改，不要全部重写**
+1. 基于现有代码修改，不要全部重写
 2. 逐条分析测试报告中的错误、BUG、不满足需求的点
 3. 精准定位问题代码并修复，保证功能符合需求
 4. 修复后保证代码规范、可运行、注释完整
@@ -101,7 +105,6 @@ class DeveloperAgent:
         ESTIMATED_RESPONSE_TOKENS = 50000
         stop_event = threading.Event()
 
-        # 实时进度监控线程
         def progress_monitor():
             while not stop_event.is_set():
                 time.sleep(1)
@@ -159,11 +162,11 @@ class DeveloperAgent:
             logger.info(f"🏁 流程结束：{task_name}\n")
 
     def _get_modified_files(self) -> list:
-        """获取所有修改的文件"""
         modified_files = []
         try:
+            # 只扫描项目目录下的文件，不扫描根目录
             for root, _, filenames in os.walk(self.project_path):
-                if any(p in root for p in ['.git', '__pycache__', '.venv', 'logs']):
+                if any(p in root for p in ['.git', '__pycache__', '.venv', 'logs', 'node_modules']):
                     continue
                 for filename in filenames:
                     if filename.startswith('.'):

@@ -4,16 +4,13 @@ import sys
 from pathlib import Path
 
 # 导入核心模块
-from auto_coder_lib.logger import setup_logger
+from auto_coder_lib.logger import setup_logger, LogContext  # 导入LogContext
 from auto_coder_lib.config import Config
 from auto_coder_lib.user_interaction import UserInteraction
 from auto_coder_lib.workflow import create_workflow
 
 # 加载环境配置
 Config.load_from_env()
-
-# 🔥 修复：传入日志名称 "auto_coder"
-logger = setup_logger("auto_coder")
 
 def main():
     """主函数"""
@@ -29,15 +26,22 @@ def main():
 
     # 校验路径
     if not docs_path.exists():
-        logger.error(f"文档路径不存在: {docs_path}")
+        print(f"文档路径不存在: {docs_path}")
         return
     if not project_path.exists():
         project_path.mkdir(parents=True, exist_ok=True)
+
+    # ====================== 关键：初始化日志上下文（项目+时间） ======================
+    LogContext.init(str(project_path))
+    
+    # 初始化全局日志（初始化后创建）
+    logger = setup_logger("auto_coder")
 
     logger.info("=" * 60)
     logger.info("AutoCoder 启动")
     logger.info(f"需求文档: {docs_path}")
     logger.info(f"项目路径: {project_path}")
+    logger.info(f"日志目录: {LogContext.current_dir}")  # 打印当前日志目录
     logger.info("=" * 60)
 
     # 初始化UI
