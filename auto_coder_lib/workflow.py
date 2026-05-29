@@ -14,8 +14,8 @@ from .task_splitter import TaskSplitter
 from .developer_agent import DeveloperAgent
 from .tester_agent import TesterAgent
 from .user_interaction import UserInteraction
+from .doc_generator import DocGenerator
 
-# 扩展状态：增加迭代修复、测试报告相关字段
 class State(TypedDict):
     docs_path: str
     project_path: str
@@ -23,30 +23,26 @@ class State(TypedDict):
     tasks: List[Dict[str, Any]]
     current_task_index: int
     retry_count: int
-    fix_iter_count: int          # 新增：当前任务修复迭代次数
-    last_test_report: str       # 新增：上一轮测试报告
-    last_test_failed: bool       # 新增：上一轮是否测试失败
+    fix_iter_count: int
+    last_test_report: str
+    last_test_failed: bool
     results: Dict[str, Any]
     status: str
 
 def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "Workflow":
-    """创建工作流"""
     logger = setup_logger("workflow")
     
-    # 初始化代理
     project_understanding = ProjectUnderstanding(docs_path, project_path)
     task_splitter = TaskSplitter()
     developer = DeveloperAgent(project_path)
     tester = TesterAgent(project_path)
     
     def understand_project(state: State) -> State:
-        """理解项目"""
         logger.info("步骤: 理解项目")
         ui.show_info("正在理解项目需求...")
         
         understanding = project_understanding.generate_understanding()
         
-        # 保存项目理解报告
         with open(Path("logs") / "project_understanding.json", "w", encoding="utf-8") as f:
             json.dump(understanding, f, ensure_ascii=False, indent=2)
             
@@ -54,13 +50,11 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
         return {**state, "project_understanding": understanding, "status": "understanding_complete"}
         
     def split_tasks(state: State) -> State:
-        """拆分任务"""
         logger.info("步骤: 拆分任务")
         ui.show_info("正在拆分开发任务...")
         
         tasks = task_splitter.split_tasks(state["project_understanding"])
         
-        # 保存任务树
         with open(Path("logs") / "tasks.json", "w", encoding="utf-8") as f:
             json.dump(tasks, f, ensure_ascii=False, indent=2)
             
@@ -78,17 +72,12 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
         }
         
     def execute_task(state: State) -> State:
-        """
-        执行任务（增强版）
-        支持：首次开发 / 基于测试报告迭代修复开发 → 测试
-        """
         tasks = state["tasks"]
         current_index = state["current_task_index"]
         fix_iter = state.get("fix_iter_count", 0)
         last_report = state.get("last_test_report", "")
         is_fix_mode = state.get("last_test_failed", False)
 
-        # 获取下一个叶子任务
         current_task = _get_next_leaf_task(tasks, current_index)
         
         if not current_task:
@@ -102,15 +91,13 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
         else:
             ui.show_info(f"正常执行任务: {current_task['name']}")
 
-        # 更新任务状态
         current_task["status"] = "running"
         
-        # ========== 1. 开发环节（区分 首次开发 / 修复开发） ==========
         dev_result = developer.develop(
             task=current_task,
             context=state["project_understanding"],
-            test_report=last_report,  # 传递上一轮测试报告
-            is_fix=is_fix_mode       # 标记是否为修复模式
+            test_report=last_report,
+            is_fix=is_fix_mode
         )
         
         if not dev_result["success"]:
@@ -122,17 +109,14 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
                 "error": dev_result["error"]
             }
             
-        # ========== 2. 测试环节 ==========
         test_result = tester.test(current_task, dev_result)
         current_task["dev_result"] = dev_result
         current_task["test_result"] = test_result
 
-        # 测试通过：正常进入下一个任务
         if test_result["success"]:
             current_task["status"] = "success"
             current_task["progress"] = 100
             ui.show_success(f"✅ 任务完成: {current_task['name']}")
-            # 重置迭代标记
             return {
                 **state,
                 "current_task_index": current_index + 1,
@@ -142,13 +126,11 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
                 "status": "task_complete"
             }
         
-        # 测试失败：判断是否继续自动迭代修复
         max_fix = getattr(Config, "MAX_FIX_ITER", 5)
         new_fix_iter = fix_iter + 1
         logger.warning(f"❌ 测试失败！当前修复迭代次数: {new_fix_iter}/{max_fix}")
         ui.show_warning(f"测试不通过，准备自动修复 (迭代 {new_fix_iter}/{max_fix})")
 
-        # 未达到最大迭代次数 → 继续自动修复（循环当前任务）
         if new_fix_iter < max_fix:
             current_task["status"] = "pending"
             return {
@@ -158,7 +140,6 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
                 "last_test_failed": True,
                 "status": "need_fix"
             }
-        # 达到最大迭代次数 → 转入失败处理，等待用户介入
         else:
             logger.error(f"⚠️ 已达到最大修复迭代次数 {max_fix}，停止自动修复")
             current_task["status"] = "failed"
@@ -170,14 +151,12 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
             }
 
     def handle_failure(state: State) -> State:
-        """处理任务最终失败（开发失败 / 修复迭代用尽）"""
         current_task = state["current_task"]
         retry_count = state.get("retry_count", 0)
         
         logger.warning(f"任务最终失败: {current_task['name']}，全局重试次数: {retry_count}")
         ui.show_error(f"任务执行失败: {current_task['name']}")
         
-        # 全局重试逻辑（原有逻辑保留）
         if retry_count < Config.MAX_RETRIES:
             ui.show_info(f"将在5秒后全局重试 (第 {retry_count + 1} 次)")
             import time
@@ -193,7 +172,6 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
                 "status": "retry"
             }
         else:
-            # 次数用尽，等待用户介入
             action = ui.wait_for_user_intervention(
                 current_task["id"],
                 current_task["name"],
@@ -232,9 +210,16 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
                 }
             elif action == "abort":
                 raise KeyboardInterrupt("用户终止执行")
-                
+
+    def generate_docs(state: State) -> State:
+        logger.info("📚 开始生成项目使用说明文档...")
+        ui.show_info("正在生成使用说明、部署指南...")
+        gen = DocGenerator(state["project_path"], state["docs_path"])
+        gen.generate_all_docs(state["project_understanding"], state["tasks"])
+        ui.show_success("✅ 所有使用文档已生成到你的docx目录")
+        return {**state, "status": "docs_generated"}
+        
     def _get_next_leaf_task(tasks: list, start_index: int) -> Optional[dict]:
-        """获取下一个叶子任务"""
         for task in tasks:
             if task.get("is_leaf", False) and task["status"] == "pending":
                 return task
@@ -245,7 +230,6 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
         return None
         
     def _save_progress(state: State):
-        """保存执行进度（兼容断点续跑）"""
         progress = {
             "tasks": state["tasks"],
             "current_task_index": state["current_task_index"],
@@ -258,32 +242,29 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
         with open(Path("logs") / "progress.json", "w", encoding="utf-8") as f:
             json.dump(progress, f, ensure_ascii=False, indent=2)
             
-    # ====================== 构建工作流图 ======================
     workflow = StateGraph(State)
     
-    # 节点注册
     workflow.add_node("understand_project", understand_project)
     workflow.add_node("split_tasks", split_tasks)
     workflow.add_node("execute_task", execute_task)
     workflow.add_node("handle_failure", handle_failure)
+    workflow.add_node("generate_docs", generate_docs)
     
-    # 入口
     workflow.set_entry_point("understand_project")
     workflow.add_edge("understand_project", "split_tasks")
     workflow.add_edge("split_tasks", "execute_task")
     
-    # 条件分支：核心流转
     workflow.add_conditional_edges(
         "execute_task",
         lambda state: state["status"],
         {
-            "task_complete": "execute_task",    # 测试通过 → 下一个任务
-            "need_fix": "execute_task",         # 测试失败、未达上限 → 重新执行当前任务(修复)
-            "task_failed": "handle_failure",    # 开发失败/修复用尽 → 进入失败处理
-            "all_tasks_complete": END           # 全部任务完成 → 结束
+            "task_complete": "execute_task",
+            "need_fix": "execute_task",
+            "task_failed": "handle_failure",
+            "all_tasks_complete": "generate_docs"
         }
     )
-    
+
     workflow.add_conditional_edges(
         "handle_failure",
         lambda state: state["status"],
@@ -293,8 +274,9 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
             "continue": "execute_task"
         }
     )
+
+    workflow.add_edge("generate_docs", END)
     
-    # 编译图
     app = workflow.compile()
     
     return Workflow(app, docs_path, project_path, ui)
@@ -308,7 +290,6 @@ class Workflow:
         self.logger = setup_logger("workflow")
         
     def run(self, resume: bool = False):
-        """运行工作流（支持断点续跑）"""
         initial_state = {
             "docs_path": self.docs_path,
             "project_path": self.project_path,
@@ -323,7 +304,6 @@ class Workflow:
             "status": "initializing"
         }
         
-        # 恢复断点
         if resume:
             progress_file = Path("logs") / "progress.json"
             if progress_file.exists():
@@ -335,5 +315,4 @@ class Workflow:
             else:
                 self.logger.warning("未找到进度文件，从头开始执行")
                 
-        # 启动工作流
         self.app.invoke(initial_state)

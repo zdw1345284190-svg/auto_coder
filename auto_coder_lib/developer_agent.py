@@ -1,5 +1,8 @@
 """
-开发代理（修复版：强制绑定项目工作目录）
+开发代理（修复版：完整报告输出 + 实时进度）
+✅ 开发报告完整显示，不再被省略
+✅ 自动保存完整报告到日志目录
+✅ 保留流式输出、实时Token、迭代修复功能
 """
 import os
 import threading
@@ -7,24 +10,24 @@ import time
 from pathlib import Path
 from langchain_claude_code import ChatClaudeCode
 from .config import Config
-from .logger import get_task_logger
+from .logger import get_task_logger, LogContext
 
 class DeveloperAgent:
     def __init__(self, project_path: str):
         self.project_path = Path(project_path)
-        # 确保项目目录存在
         self.project_path.mkdir(parents=True, exist_ok=True)
         
-        # 关键修复：初始化时就绑定项目工作目录
+        # 强制绑定项目工作目录，避免根目录污染
         self.llm = ChatClaudeCode(
             cli_path=Config.CLAUDE_CODE_CLI_PATH,
             temperature=Config.DEVELOPER_TEMPERATURE,
             timeout=Config.TASK_TIMEOUT,
-            work_dir=str(self.project_path)  # 强制绑定项目目录
+            work_dir=str(self.project_path)
         )
 
     @staticmethod
     def count_tokens(text: str) -> int:
+        """全局统一Token计算规则"""
         return len(text) // 4
 
     def develop(self, task: dict, context: dict, test_report: str = "", is_fix: bool = False) -> dict:
@@ -42,7 +45,7 @@ class DeveloperAgent:
         logger.info(f"项目工作目录：{self.project_path}")
         logger.info("=" * 80)
 
-        # 关键修复：在提示词中再次强调工作目录，避免模型执行全局命令
+        # 提示词（强制绑定工作目录，避免根目录污染）
         if not is_fix:
             prompt = f"""
 # 全新开发任务执行
@@ -65,7 +68,7 @@ class DeveloperAgent:
 ## 开发要求
 1. 编写可运行、规范、带注释的代码
 2. 自动创建/修改项目文件
-3. 完成后输出开发总结报告
+3. 完成后输出完整的开发总结报告
             """
         else:
             prompt = f"""
@@ -98,7 +101,6 @@ class DeveloperAgent:
 
         prompt_tokens = self.count_tokens(prompt)
         logger.info(f"📝 提示词总Token：{prompt_tokens}")
-        logger.debug(f"提示词内容预览：{prompt[:500]}...")
 
         full_response = []
         current_tokens = 0
@@ -127,7 +129,8 @@ class DeveloperAgent:
                 if chunk.content:
                     full_response.append(chunk.content)
                     current_tokens = self.count_tokens("".join(full_response))
-                    logger.debug(f"✍️ 实时生成片段：{chunk.content.strip()[:100]}...")
+                    # 🔥 修复：去掉[:100]截断，完整输出内容
+                    logger.debug(f"✍️ 实时生成片段：{chunk.content.strip()}")
 
             final_response = "".join(full_response)
             total_generated_tokens = self.count_tokens(final_response)
@@ -141,6 +144,9 @@ class DeveloperAgent:
             logger.info(f"📁 本次任务修改文件数：{len(modified_files)}")
             for f in modified_files[:10]:
                 logger.debug(f"已修改文件：{f}")
+
+            # 🔥 新增：自动保存完整开发报告到日志目录
+            self._save_dev_report(task_id, task_name, final_response, is_fix)
 
             return {
                 "success": True,
@@ -175,3 +181,27 @@ class DeveloperAgent:
         except Exception as e:
             get_task_logger("dev").warning(f"获取文件列表失败：{e}")
         return modified_files
+
+    def _save_dev_report(self, task_id: str, task_name: str, report: str, is_fix: bool):
+        """保存完整开发/修复报告到日志目录"""
+        type_str = "修复报告" if is_fix else "开发报告"
+        filename = f"dev_report_{task_id[:8]}_{type_str}.md"
+        report_path = LogContext.current_dir / filename
+
+        content = f"""# {type_str} - {task_name}
+任务ID：{task_id}
+生成时间：{self._get_current_time()}
+
+---
+
+{report}
+"""
+
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        
+        get_task_logger(task_id).info(f"📄 完整{type_str}已保存：{report_path}")
+
+    def _get_current_time(self) -> str:
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
