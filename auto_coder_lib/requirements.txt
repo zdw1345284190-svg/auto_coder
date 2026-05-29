@@ -1,0 +1,5 @@
+langchain-claude-code>=0.1.0
+langgraph>=0.1.0
+python-dotenv>=1.0.0
+rich>=13.0.0
+watchdog>=4.0.0
