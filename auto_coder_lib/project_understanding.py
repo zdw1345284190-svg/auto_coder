@@ -1,17 +1,17 @@
 """
-项目理解模块【终极正确版】
-✅ 不再用Python读取所有文件！
-✅ 让ClaudeCode自己访问项目、自己读文件、自己分析！
-✅ 提示词极小，永不超长，100%不崩溃
+项目理解模块
+优化：不再Python手动读取拼接文件，交由Claude原生遍历，彻底解决上下文超限
+内置JSON容错，解析失败自动返回默认结构
+新增：生成结构化Markdown总结报告
 """
-import os
 import threading
 import time
 import json
 from pathlib import Path
+from datetime import datetime
 from langchain_claude_code import ChatClaudeCode
 from .config import Config
-from .logger import setup_logger
+from .logger import setup_logger, LogContext
 
 class ProjectUnderstanding:
     def __init__(self, docs_path: str, project_path: str):
@@ -27,10 +27,12 @@ class ProjectUnderstanding:
 
     @staticmethod
     def count_tokens(text: str) -> int:
+        """统一Token计算规则"""
         return len(text) // 4
 
     @staticmethod
     def clean_json_content(content: str) -> str:
+        """清洗Markdown代码块标记"""
         if not content:
             return ""
         content = content.strip()
@@ -40,45 +42,80 @@ class ProjectUnderstanding:
             content = content[:-3]
         return content.strip()
 
+    def _generate_understanding_report(self, data: dict):
+        """生成项目理解Markdown总结报告"""
+        report_path = LogContext.current_dir / "project_understanding_summary.md"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        content = f"""# 项目理解总结报告
+生成时间：{now}
+项目目录：{self.project_path}
+需求文档目录：{self.docs_path}
+
+---
+## 1. 项目概述
+{data.get('project_overview', '无')}
+
+## 2. 核心功能
+{chr(10).join([f"- {item}" for item in data.get('core_features', [])]) or '无'}
+
+## 3. 技术栈
+{chr(10).join([f"- {k}: {v}" for k, v in data.get('tech_stack', {}).items()]) or '无'}
+
+## 4. 项目架构
+{data.get('architecture', '无')}
+
+## 5. 现有模块
+{chr(10).join([f"- {item}" for item in data.get('existing_modules', [])]) or '无'}
+
+## 6. 缺失功能
+{chr(10).join([f"- {item}" for item in data.get('missing_features', [])]) or '无'}
+
+## 7. 潜在问题
+{chr(10).join([f"- {item}" for item in data.get('potential_issues', [])]) or '无'}
+
+## 8. 开发优先级
+{chr(10).join([f"- {item}" for item in data.get('development_priorities', [])]) or '无'}
+"""
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        self.logger.info(f"📄 项目理解总结报告已生成：{report_path}")
+
     def generate_understanding(self) -> dict:
-        """【正确方式】让ClaudeCode自己分析项目，无需Python读文件"""
         self.logger.info("=" * 80)
-        self.logger.info("📚 【正确模式】让 ClaudeCode 自己分析项目")
+        self.logger.info("📚 开始项目分析（Claude原生遍历文件）")
         self.logger.info("=" * 80)
 
-        # 🔥 核心：极简提示词，只告诉路径，让模型自己读！
+        # 极简提示词，仅传递路径，由Claude自行读取文件
         prompt = f"""
-你是项目分析助手。
+请分析当前项目，严格只返回标准JSON，不要额外文字、注释、markdown格式。
 
-项目信息：
-- 需求文档目录：{self.docs_path}
-- 项目代码目录：{self.project_path}
+需求文档目录：{self.docs_path}
+项目代码目录：{self.project_path}
 
-请你自己遍历目录、读取文件、分析项目。
-严格只返回标准JSON，不要任何多余文字、解释、markdown。
-
-返回字段：
+JSON字段要求：
 project_overview, core_features, tech_stack, architecture, existing_modules, missing_features, potential_issues, development_priorities
 """
 
         prompt_tokens = self.count_tokens(prompt)
-        self.logger.info(f"📝 提示词 Token：{prompt_tokens} (极小，永不超长)")
+        self.logger.info(f"📝 提示词Token：{prompt_tokens}")
 
         full_response = []
         current_tokens = 0
         stop_event = threading.Event()
 
+        # 实时进度监控
         def progress_monitor():
             while not stop_event.is_set():
                 time.sleep(1)
                 if current_tokens > 0:
-                    self.logger.debug(f"📊 实时生成：{current_tokens} Token")
+                    self.logger.debug(f"📊 实时生成Token：{current_tokens}")
 
         monitor_thread = threading.Thread(target=progress_monitor, daemon=True)
         monitor_thread.start()
 
         try:
-            self.logger.info("🔍 ClaudeCode 正在自己分析项目...")
+            self.logger.info("🔍 Claude 正在自动分析项目...")
             for chunk in self.llm.stream(prompt):
                 if chunk.content:
                     full_response.append(chunk.content)
@@ -86,31 +123,39 @@ project_overview, core_features, tech_stack, architecture, existing_modules, mis
 
             final_content = "".join(full_response)
             cleaned_content = self.clean_json_content(final_content)
-            
             generated_tokens = self.count_tokens(cleaned_content)
             self.logger.info(f"✅ 分析完成 | 总Token：{prompt_tokens + generated_tokens}")
 
-            # 解析失败自动返回默认值
-            try:
-                return json.loads(cleaned_content)
-            except:
-                self.logger.error("❌ 解析失败，使用默认项目结构")
-                return self._default()
+            # JSON解析容错
+            result = json.loads(cleaned_content)
+            
+            # 生成Markdown总结报告
+            self._generate_understanding_report(result)
+            
+            return result
 
+        except json.JSONDecodeError as e:
+            self.logger.error(f"❌ JSON解析失败：{str(e)}，使用默认项目结构", exc_info=True)
+            default = self._get_default_struct()
+            self._generate_understanding_report(default)
+            return default
         except Exception as e:
-            self.logger.error(f"❌ 执行失败：{str(e)}")
-            return self._default()
+            self.logger.error(f"❌ 项目分析异常：{str(e)}", exc_info=True)
+            default = self._get_default_struct()
+            self._generate_understanding_report(default)
+            return default
         finally:
             stop_event.set()
             monitor_thread.join()
-            self.logger.info("🏁 项目理解完成\n")
+            self.logger.info("🏁 项目理解流程结束\n")
 
-    def _default(self):
+    def _get_default_struct(self) -> dict:
+        """解析/执行失败兜底结构，保证流程不中断"""
         return {
-            "project_overview": "自动分析项目",
+            "project_overview": "项目自动分析（解析失败兜底）",
             "core_features": [],
             "tech_stack": {},
-            "architecture": "未知",
+            "architecture": "单体应用",
             "existing_modules": [],
             "missing_features": [],
             "potential_issues": [],
