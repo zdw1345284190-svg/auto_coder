@@ -14,9 +14,6 @@ logs/
 project/*
 docx/*
 
-# 配置文件
-.env
-
 # Python 缓存与构建产物
 __pycache__/
 *.py[cod]
