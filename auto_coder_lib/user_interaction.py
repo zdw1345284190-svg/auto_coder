@@ -79,7 +79,13 @@ class UserInteraction:
             title="需要用户介入",
             border_style="red"
         ))
-        
+
+        # 非交互模式下自动跳过
+        import os
+        if os.getenv("AUTO_MODE") == "1":
+            self.console.print("[yellow]非交互模式，自动跳过任务[/yellow]")
+            return "skip"
+
         while True:
             choice = Prompt.ask("请输入选项 (1-4)", choices=["1", "2", "3", "4"])
             if choice == "1":

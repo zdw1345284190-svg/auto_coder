@@ -21,6 +21,7 @@ class Config:
     MAX_CONTEXT_LENGTH = 2000000  # 200万token
     MAX_RETRIES = 3
     TASK_TIMEOUT = 3600  # 1小时
+    MAX_FIX_ITER = 5  # 单任务最大自动修复迭代次数
     
     # 日志配置
     LOG_LEVEL = "INFO"

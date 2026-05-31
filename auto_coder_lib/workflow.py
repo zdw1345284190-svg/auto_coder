@@ -20,13 +20,16 @@ from .doc_generator import DocGenerator
 class State(TypedDict):
     docs_path: str
     project_path: str
+    docs_content: str
     project_understanding: Dict[str, Any]
     tasks: List[Dict[str, Any]]
     current_task_index: int
+    current_task: Dict[str, Any]
     retry_count: int
     fix_iter_count: int
     last_test_report: str
     last_test_failed: bool
+    error: str
     results: Dict[str, Any]
     status: str
 
@@ -113,9 +116,9 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
             curr_task["status"] = "failed"
             return {
                 **state,
-                "status": "task_failed",
                 "current_task": curr_task,
-                "error": dev_res["error"]
+                "error": dev_res["error"],
+                "status": "task_failed"
             }
 
         test_res = test_agent.test(curr_task, dev_res)
@@ -172,6 +175,7 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
             curr_task["status"] = "pending"
             return {
                 **state,
+                "current_task": curr_task,
                 "retry_count": retry_cnt + 1,
                 "fix_iter_count": 0,
                 "last_test_report": "",
@@ -199,8 +203,21 @@ def create_workflow(docs_path: str, project_path: str, ui: UserInteraction) -> "
         """业务任务全部完成后，自动生成交付文档"""
         logger.info("📚 开始生成项目交付文档")
         ui.show_info("正在生成使用说明、部署文档...")
+        # 读取用户原始需求文档
+        docs_content = ""
+        docs_p = Path(state["docs_path"])
+        if docs_p.exists():
+            readme = docs_p / "readme.md"
+            if not readme.exists():
+                readme = docs_p / "README.md"
+            if readme.exists():
+                docs_content = readme.read_text(encoding="utf-8")
         doc_gen = DocGenerator(state["project_path"], state["docs_path"])
-        doc_gen.generate_all_docs(state["project_understanding"], state["tasks"])
+        doc_gen.generate_all_docs(
+            state["project_understanding"],
+            state["tasks"],
+            docs_content,
+        )
         ui.show_success("交付文档全部生成完成")
         return {**state, "status": "docs_generated"}
 
@@ -257,13 +274,16 @@ class Workflow:
         init_state = {
             "docs_path": self.docs_path,
             "project_path": self.project_path,
+            "docs_content": "",
             "project_understanding": None,
             "tasks": [],
             "current_task_index": 0,
+            "current_task": {},
             "retry_count": 0,
             "fix_iter_count": 0,
             "last_test_report": "",
             "last_test_failed": False,
+            "error": "",
             "results": {},
             "status": "initializing"
         }
@@ -291,5 +311,8 @@ class Workflow:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
         # 执行工作流
-        self.app.invoke(init_state)
-        save_progress(init_state)
+        final_state = self.app.invoke(init_state, config={"recursion_limit": 200})
+        if final_state:
+            save_progress(final_state)
+        else:
+            save_progress(init_state)
